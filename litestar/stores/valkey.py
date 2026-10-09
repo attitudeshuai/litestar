@@ -25,6 +25,8 @@ class ValkeyStore(NamespacedStore):
     """Valkey based, thread and process safe asynchronous key/value store."""
 
     __slots__ = (
+        "_compare_and_delete_script",
+        "_compare_and_set_script",
         "_delete_all_script",
         "_get_and_renew_script",
         "_valkey",
@@ -76,6 +78,47 @@ class ValkeyStore(NamespacedStore):
             end
             cursor = tonumber(result[1])
         until cursor == 0
+        """
+        )
+
+        # script to atomically set a value only if it currently equals the expected value
+        # ARGV[1] = expected value (only used when ARGV[2] == '1')
+        # ARGV[2] = '1' if a (possibly empty) value is expected, '0' if the key is expected to be absent
+        # ARGV[3] = new value
+        # ARGV[4] = expiry in seconds ('-1' = no expiry)
+        self._compare_and_set_script = self._valkey.register_script(
+            b"""
+        local key = KEYS[1]
+        local expects_present = ARGV[2]
+        local current = server.call('GET', key)
+
+        if expects_present == '1' then
+            if current ~= ARGV[1] then
+                return 0
+            end
+        elseif current ~= false then
+            return 0
+        end
+
+        local ttl = tonumber(ARGV[4])
+        if ttl and ttl > 0 then
+            server.call('SET', key, ARGV[3], 'EX', ttl)
+        else
+            server.call('SET', key, ARGV[3])
+        end
+        return 1
+        """
+        )
+
+        # script to atomically delete a key only if it currently equals the expected value
+        self._compare_and_delete_script = self._valkey.register_script(
+            b"""
+        local key = KEYS[1]
+        local current = server.call('GET', key)
+        if current == false or current ~= ARGV[1] then
+            return 0
+        end
+        return server.call('DEL', key)
         """
         )
 
@@ -210,3 +253,50 @@ class ValkeyStore(NamespacedStore):
         """
         ttl = await self._valkey.ttl(self._make_key(key))
         return None if ttl == -2 else ttl
+
+    async def compare_and_set(
+        self,
+        key: str,
+        old_value: bytes | None,
+        new_value: str | bytes,
+        expires_in: int | timedelta | None = None,
+    ) -> bool:
+        """Atomically set ``new_value`` for ``key`` if the stored value equals ``old_value``.
+
+        Guarantees atomicity using a Lua script. ``old_value`` of ``None`` means the
+        ``key`` is expected to be absent.
+
+        Args:
+            key: Key to associate the value with
+            old_value: The value expected to be currently stored under ``key``, or
+                ``None`` if the key is expected to be absent
+            new_value: Value to store if the comparison succeeds
+            expires_in: Time in seconds before the key is considered expired
+
+        Returns:
+            ``True`` if the value was set, ``False`` if the comparison failed
+        """
+        if isinstance(new_value, str):
+            new_value = new_value.encode("utf-8")
+        if isinstance(expires_in, timedelta):
+            expires_in = int(expires_in.total_seconds())
+        result = await self._compare_and_set_script(
+            keys=[self._make_key(key)],
+            args=[old_value or b"", int(old_value is not None), new_value, expires_in or -1],
+        )
+        return bool(result)
+
+    async def compare_and_delete(self, key: str, expected_value: bytes) -> bool:
+        """Atomically delete ``key`` if the stored value equals ``expected_value``.
+
+        Guarantees atomicity using a Lua script.
+
+        Args:
+            key: Key of the value to delete
+            expected_value: The value expected to be currently stored under ``key``
+
+        Returns:
+            ``True`` if the key was deleted, ``False`` if the comparison failed
+        """
+        result = await self._compare_and_delete_script(keys=[self._make_key(key)], args=[expected_value])
+        return bool(result)

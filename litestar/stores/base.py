@@ -79,6 +79,61 @@ class Store(ABC):
         """
         raise NotImplementedError
 
+    async def compare_and_set(
+        self,
+        key: str,
+        old_value: bytes | None,
+        new_value: str | bytes,
+        expires_in: int | timedelta | None = None,
+    ) -> bool:
+        """Atomically set ``new_value`` for ``key`` if, and only if, the value currently
+        stored under ``key`` equals ``old_value``.
+
+        ``old_value`` of ``None`` means the ``key`` is expected to be absent.
+
+        Args:
+            key: Key to associate the value with
+            old_value: The value expected to be currently stored under ``key``, or
+                ``None`` if the key is expected to be absent
+            new_value: Value to store if the comparison succeeds
+            expires_in: Time in seconds before the key is considered expired
+
+        Returns:
+            ``True`` if the value was set, ``False`` if the comparison failed because the
+            key held a different value.
+
+        Note:
+            The default implementation is a non-atomic best-effort fallback. Backends
+            capable of atomic compare-and-set operations should override this.
+        """
+        current = await self.get(key)
+        if current != old_value:
+            return False
+        await self.set(key, new_value, expires_in=expires_in)
+        return True
+
+    async def compare_and_delete(self, key: str, expected_value: bytes) -> bool:
+        """Atomically delete ``key`` if, and only if, the value currently stored under
+        ``key`` equals ``expected_value``.
+
+        Args:
+            key: Key of the value to delete
+            expected_value: The value expected to be currently stored under ``key``
+
+        Returns:
+            ``True`` if the key was deleted, ``False`` if the comparison failed because
+            the key was absent or held a different value.
+
+        Note:
+            The default implementation is a non-atomic best-effort fallback. Backends
+            capable of atomic compare-and-set operations should override this.
+        """
+        current = await self.get(key)
+        if current != expected_value:
+            return False
+        await self.delete(key)
+        return True
+
     async def __aenter__(self) -> None:  # noqa: B027
         pass
 

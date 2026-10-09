@@ -12,6 +12,7 @@ from typing import (
 
 from litestar.connection import ASGIConnection
 from litestar.enums import ScopeType
+from litestar.exceptions import HTTPException
 from litestar.middleware.base import AbstractMiddleware, DefineMiddleware
 from litestar.serialization import decode_json, encode_json
 from litestar.utils import get_serializer_from_scope
@@ -213,6 +214,7 @@ class SessionMiddleware(AbstractMiddleware, Generic[BaseSessionBackendT]):
         Returns:
             None
         """
+        error_response_sent = False
 
         async def wrapped_send(message: Message) -> None:
             """Wrap the ``send`` function.
@@ -225,16 +227,56 @@ class SessionMiddleware(AbstractMiddleware, Generic[BaseSessionBackendT]):
             Returns:
                 None
             """
+            nonlocal error_response_sent
+
             if message["type"] != "http.response.start":
+                if error_response_sent:
+                    # the original response is being replaced by an error response
+                    return
                 await connection.send(message)
                 return
 
             scope_session = connection.scope.get("session")
 
-            await self.backend.store_in_message(scope_session, message, connection)
+            try:
+                await self.backend.store_in_message(scope_session, message, connection)
+            except HTTPException as exc:
+                # the response has not actually been sent yet; replace it with a proper error
+                # response instead of letting the exception propagate (which would surface as a
+                # generic error because inner exception-handling middleware already marked the
+                # response as started)
+                if connection.scope["type"] != ScopeType.HTTP:
+                    raise
+                error_response_sent = True
+                await self.send_error_response(connection, exc)
+                return
             await connection.send(message)
 
         return wrapped_send
+
+    @staticmethod
+    async def send_error_response(connection: ASGIConnection, exc: HTTPException) -> None:
+        """Render an :class:`HTTPException` raised while storing the session as an ASGI response.
+
+        Args:
+            connection: Originating ASGIConnection
+            exc: The exception raised by the session backend
+
+        Returns:
+            None
+        """
+        from litestar.exceptions.responses import create_exception_response
+
+        litestar_app = connection.scope["litestar_app"]
+        request = litestar_app.request_class(
+            scope=connection.scope, receive=connection.receive, send=connection.send
+        )
+        response = create_exception_response(request=request, exc=exc)
+        await response.to_asgi_response(request=request, type_encoders=litestar_app.type_encoders)(
+            scope=connection.scope,
+            receive=connection.receive,
+            send=connection.send,
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """ASGI-callable.

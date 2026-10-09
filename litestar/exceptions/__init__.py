@@ -8,6 +8,7 @@ from .base_exceptions import (
 from .dto_exceptions import DTOFactoryException, InvalidAnnotationException
 from .http_exceptions import (
     ClientException,
+    ConflictException,
     HTTPException,
     ImproperlyConfiguredException,
     InternalServerException,
@@ -25,6 +26,7 @@ from .websocket_exceptions import WebSocketDisconnect, WebSocketException
 
 __all__ = (
     "ClientException",
+    "ConflictException",
     "DTOFactoryException",
     "HTTPException",
     "ImproperlyConfiguredException",

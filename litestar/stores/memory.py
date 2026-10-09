@@ -106,6 +106,61 @@ class MemoryStore(Store):
         """Check if a given ``key`` exists."""
         return key in self._store
 
+    async def compare_and_set(
+        self,
+        key: str,
+        old_value: bytes | None,
+        new_value: str | bytes,
+        expires_in: int | timedelta | None = None,
+    ) -> bool:
+        """Atomically set ``new_value`` for ``key`` if the stored value equals ``old_value``.
+
+        ``old_value`` of ``None`` means the ``key`` is expected to be absent (or expired).
+        The whole comparison and write happen while holding the store's lock.
+
+        Args:
+            key: Key to associate the value with
+            old_value: The value expected to be currently stored under ``key``, or
+                ``None`` if the key is expected to be absent
+            new_value: Value to store if the comparison succeeds
+            expires_in: Time in seconds before the key is considered expired
+
+        Returns:
+            ``True`` if the value was set, ``False`` if the comparison failed
+        """
+        if isinstance(new_value, str):
+            new_value = new_value.encode("utf-8")
+        async with self._lock:
+            storage_obj = self._store.get(key)
+            if storage_obj and storage_obj.expired:
+                self._store.pop(key, None)
+                storage_obj = None
+            current = storage_obj.data if storage_obj is not None else None
+            if current != old_value:
+                return False
+            self._store[key] = StorageObject.new(data=new_value, expires_in=expires_in)
+            return True
+
+    async def compare_and_delete(self, key: str, expected_value: bytes) -> bool:
+        """Atomically delete ``key`` if the stored value equals ``expected_value``.
+
+        Args:
+            key: Key of the value to delete
+            expected_value: The value expected to be currently stored under ``key``
+
+        Returns:
+            ``True`` if the key was deleted, ``False`` if the comparison failed
+        """
+        async with self._lock:
+            storage_obj = self._store.get(key)
+            if storage_obj and storage_obj.expired:
+                self._store.pop(key, None)
+                storage_obj = None
+            if storage_obj is None or storage_obj.data != expected_value:
+                return False
+            self._store.pop(key, None)
+            return True
+
     async def expires_in(self, key: str) -> int | None:
         """Get the time in seconds ``key`` expires in. If no such ``key`` exists or no
         expiry time was set, return ``None``.

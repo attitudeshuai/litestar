@@ -45,7 +45,11 @@ class ScopeState:
         "parsed_query",
         "response_compressed",
         "response_started",
+        "session_base",
+        "session_iat",
         "session_id",
+        "session_id_regenerated",
+        "session_revoked",
         "url",
     )
 
@@ -69,7 +73,11 @@ class ScopeState:
         self.parsed_query = Empty
         self.response_compressed = Empty
         self.response_started = False
+        self.session_base = Empty
+        self.session_iat = Empty
         self.session_id = Empty
+        self.session_id_regenerated = False
+        self.session_revoked = False
         self.url = Empty
 
     accept: Accept | EmptyType
@@ -91,7 +99,11 @@ class ScopeState:
     parsed_query: tuple[tuple[str, str], ...] | EmptyType
     response_compressed: bool | EmptyType
     response_started: bool
+    session_base: bytes | None | EmptyType
+    session_iat: float | EmptyType
     session_id: str | None | EmptyType
+    session_id_regenerated: bool
+    session_revoked: bool
     url: URL | EmptyType
 
     @classmethod

@@ -10,6 +10,7 @@ from litestar.status_codes import (
     HTTP_403_FORBIDDEN,
     HTTP_404_NOT_FOUND,
     HTTP_405_METHOD_NOT_ALLOWED,
+    HTTP_409_CONFLICT,
     HTTP_413_REQUEST_ENTITY_TOO_LARGE,
     HTTP_429_TOO_MANY_REQUESTS,
     HTTP_500_INTERNAL_SERVER_ERROR,
@@ -19,6 +20,7 @@ from litestar.types.empty import Empty, EmptyType
 
 __all__ = (
     "ClientException",
+    "ConflictException",
     "HTTPException",
     "ImproperlyConfiguredException",
     "InternalServerException",
@@ -134,6 +136,14 @@ class TooManyRequestsException(ClientException):
     """Request limits have been exceeded."""
 
     status_code = HTTP_429_TOO_MANY_REQUESTS
+
+
+class ConflictException(ClientException):
+    """Request conflicts with the current state of the target resource, e.g. a stale
+    version of a versioned resource.
+    """
+
+    status_code = HTTP_409_CONFLICT
 
 
 class InternalServerException(HTTPException):
