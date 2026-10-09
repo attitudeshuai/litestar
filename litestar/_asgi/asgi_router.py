@@ -208,6 +208,14 @@ class ASGIRouter:
                 started = True
                 await receive()
 
+                # the shutdown notification has arrived. If the drain capability is
+                # enabled, wait for in-flight requests to finish (or be aborted after
+                # the configured deadline) *before* the lifespan context exits, i.e.
+                # before the on_shutdown hooks and lifespan managers release the
+                # resources that in-flight requests may still depend on.
+                if self.app.drain.enabled:
+                    await self.app.drain.begin_drain()
+
         except BaseException as e:
             formatted_exception = format_exc()
             failure_message: LifeSpanStartupFailedEvent | LifeSpanShutdownFailedEvent

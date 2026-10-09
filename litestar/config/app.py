@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from litestar.config.compression import CompressionConfig
     from litestar.config.cors import CORSConfig
     from litestar.config.csrf import CSRFConfig
+    from litestar.config.drain import DrainConfig
     from litestar.connection import Request, WebSocket
     from litestar.datastructures import CacheControlHeader, ETag
     from litestar.di import Provide
@@ -115,6 +116,11 @@ class AppConfig:
     """A string keyed dictionary of dependency :class:`Provider <.di.Provide>` instances."""
     dto: type[AbstractDTO] | None | EmptyType = field(default=Empty)
     """:class:`AbstractDTO <.dto.base_dto.AbstractDTO>` to use for (de)serializing and validation of request data."""
+    drain_config: DrainConfig | None = field(default=None)
+    """Optional shutdown drain configuration. When set, the application enters a
+    draining state on shutdown (or on explicit trigger), rejecting new requests except
+    for configured probe paths while in-flight requests finish or are aborted after a
+    deadline."""
     etag: ETag | None = field(default=None)
     """An ``etag`` header of type :class:`ETag <.datastructures.ETag>` to add to route handlers of this app.
 

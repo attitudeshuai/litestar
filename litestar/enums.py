@@ -2,6 +2,7 @@ from enum import StrEnum
 
 __all__ = (
     "CompressionEncoding",
+    "DrainState",
     "HttpMethod",
     "MediaType",
     "OpenAPIMediaType",
@@ -91,3 +92,20 @@ class ASGIExtension(StrEnum):
     TLS = "tls"
     EARLY_HINTS = "http.response.early_hint"
     HTTP_TRAILERS = "http.response.trailers"
+
+
+class DrainState(StrEnum):
+    """Observable state of an application's shutdown drain.
+
+    ``RUNNING`` -> ``DRAINING`` -> ``DRAINED`` is the only legal transition order,
+    and it is performed exactly once.
+    """
+
+    RUNNING = "running"
+    """The application is serving traffic normally."""
+    DRAINING = "draining"
+    """A shutdown notification has been received. New requests are rejected, except
+    configured probe paths, while in-flight requests are allowed to complete."""
+    DRAINED = "drained"
+    """The drain has completed - either because all in-flight requests finished or the
+    configured deadline elapsed. Shutdown hooks run only after this state is reached."""

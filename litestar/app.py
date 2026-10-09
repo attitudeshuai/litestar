@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import collections
 import inspect
 import itertools
@@ -28,6 +29,7 @@ from litestar.config.app import AppConfig, ExperimentalFeatures
 from litestar.config.response_cache import ResponseCacheConfig
 from litestar.connection import Request, WebSocket
 from litestar.datastructures.state import State
+from litestar.drain import DrainManager, DrainResult, DrainStatus
 from litestar.events.emitter import BaseEventEmitterBackend, SimpleEventEmitter
 from litestar.exceptions import (
     ImproperlyConfiguredException,
@@ -62,8 +64,10 @@ if TYPE_CHECKING:
     from litestar.config.compression import CompressionConfig
     from litestar.config.cors import CORSConfig
     from litestar.config.csrf import CSRFConfig
+    from litestar.config.drain import DrainConfig
     from litestar.datastructures import CacheControlHeader, ETag
     from litestar.dto import AbstractDTO
+    from litestar.enums import DrainState
     from litestar.events.listener import EventListener
     from litestar.openapi.spec import SecurityRequirement
     from litestar.openapi.spec.open_api import OpenAPI
@@ -149,6 +153,7 @@ class Litestar(Router):
         "cors_config",
         "csrf_config",
         "debugger_module",
+        "drain",
         "event_emitter",
         "experimental_features",
         "multipart_form_part_limit",
@@ -181,6 +186,7 @@ class Litestar(Router):
         cors_config: CORSConfig | None = None,
         csrf_config: CSRFConfig | None = None,
         dto: type[AbstractDTO] | EmptyType | None = Empty,
+        drain_config: DrainConfig | None = None,
         debug: bool | None = None,
         dependencies: Dependencies | None = None,
         etag: ETag | None = None,
@@ -251,8 +257,14 @@ class Litestar(Router):
             dependencies: A string keyed mapping of dependency :class:`Providers <.di.Provide>`.
             dto: :class:`AbstractDTO <.dto.base_dto.AbstractDTO>` to use for (de)serializing and
                 validation of request data.
-            etag: An ``etag`` header of type :class:`ETag <.datastructures.ETag>` to add to route handlers of this app.
-                Can be overridden by route handlers.
+            drain_config: An optional :class:`DrainConfig <.config.drain.DrainConfig>` enabling the
+                shutdown drain capability. When configured, the application enters a draining state
+                after the shutdown notification, rejecting new requests (with a configurable
+                ``Retry-After`` hint) except for probe paths, while in-flight requests complete or
+                are aborted after the configured deadline. Shutdown hooks run only after the drain
+                has completed. When not provided, request handling and lifespan hooks are unchanged.
+            etag: An ``etag`` header of type :class:`ETag <.datastructures.ETag>` to add to route handlers of
+                this app. Can be overridden by route handlers.
             event_emitter_backend: A subclass of
                 :class:`BaseEventEmitterBackend <.events.emitter.BaseEventEmitterBackend>`.
             exception_handlers: A mapping of status codes and/or exception types to handler functions.
@@ -340,6 +352,7 @@ class Litestar(Router):
             debug=debug,
             dependencies=dict(dependencies or {}),
             dto=dto,
+            drain_config=drain_config,
             etag=etag,
             event_emitter_backend=event_emitter_backend,
             exception_handlers=exception_handlers or {},
@@ -395,6 +408,7 @@ class Litestar(Router):
         self.stores: StoreRegistry = (
             config.stores if isinstance(config.stores, StoreRegistry) else StoreRegistry(config.stores)
         )
+        self.drain = DrainManager(config.drain_config)
         self._lifespan_managers = config.lifespan
         for store in self.stores._stores.values():
             self._lifespan_managers.append(store)
@@ -573,7 +587,16 @@ class Litestar(Router):
 
         scope["app"] = scope["litestar_app"] = self
         scope.setdefault("state", {})
-        await self.asgi_handler(scope, receive, self._wrap_send(send=send, scope=scope))  # type: ignore[arg-type]
+        wrapped_send = self._wrap_send(send=send, scope=scope)
+        if self.drain.enabled:
+            await self.drain.gate(
+                scope,  # type: ignore[arg-type]
+                receive,  # type: ignore[arg-type]
+                wrapped_send,
+                next_app=self.asgi_handler,
+            )
+            return
+        await self.asgi_handler(scope, receive, wrapped_send)  # type: ignore[arg-type]
 
     @classmethod
     def from_scope(cls, scope: Scope) -> Litestar:
@@ -609,7 +632,63 @@ class Litestar(Router):
             for hook in self.on_startup:
                 await self._call_lifespan_hook(hook)
 
+            if self.drain.enabled:
+                # register the optional OS-signal triggers for the serving period;
+                # removed (LIFO) before the shutdown hooks run
+                self.drain.install_signal_handlers(asyncio.get_running_loop())
+                exit_stack.callback(self.drain.remove_signal_handlers)
+
             yield
+
+    @property
+    def drain_state(self) -> DrainState:
+        """Current drain state of the application.
+
+        See :class:`DrainState <litestar.enums.DrainState>` for the possible values.
+        When the drain capability is not enabled this is always
+        :attr:`DrainState.RUNNING <litestar.enums.DrainState.RUNNING>`.
+        """
+        return self.drain.state
+
+    @property
+    def in_flight_request_count(self) -> int:
+        """Number of requests currently being processed.
+
+        Only tracked while the drain capability is enabled - the admission gate
+        performs the accounting. When the capability is not enabled the value is
+        always ``0`` and request handling incurs no tracking overhead. The drain
+        trigger request itself is not counted.
+        """
+        return self.drain.in_flight_request_count
+
+    def get_drain_status(self) -> DrainStatus:
+        """Return a consistent snapshot of the drain state and request counters.
+
+        Use this from health / readiness probe handlers to observe whether the
+        instance is running, draining or drained and how many requests are in flight.
+        """
+        return self.drain.get_status()
+
+    async def begin_drain(self) -> DrainResult:
+        """Begin the shutdown drain and wait for it to complete.
+
+        Transitions the application from
+        :attr:`DrainState.RUNNING <litestar.enums.DrainState.RUNNING>` to
+        :attr:`DrainState.DRAINING <litestar.enums.DrainState.DRAINING>` and, once all
+        in-flight requests have completed or the configured deadline has elapsed, to
+        :attr:`DrainState.DRAINED <litestar.enums.DrainState.DRAINED>`.
+
+        The method is idempotent: repeated or concurrent calls await the same drain
+        and receive the exact same :class:`DrainResult <litestar.drain.DrainResult>`.
+        It may be called explicitly (e.g. from an administrative endpoint). The ASGI
+        ``lifespan.shutdown`` event triggers it automatically, in which case the
+        shutdown hooks run only after the drain has completed.
+
+        Raises:
+            RuntimeError: If no :class:`DrainConfig <litestar.config.drain.DrainConfig>`
+                was passed to the application.
+        """
+        return await self.drain.begin_drain()
 
     @property
     def openapi_schema(self) -> OpenAPI:
