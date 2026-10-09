@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from typing import Self
 
     from litestar.datastructures import URL, Accept, Headers, UploadFile
+    from litestar.di import DependencyCache
     from litestar.types.asgi_types import Scope
     from litestar.types.composite_types import ExceptionHandlersMap
 
@@ -78,7 +79,7 @@ class ScopeState:
     content_type: tuple[str, dict[str, str]] | EmptyType
     cookies: dict[str, str] | EmptyType
     csrf_token: str | EmptyType
-    dependency_cache: dict[str, Any] | EmptyType
+    dependency_cache: DependencyCache | EmptyType
     do_cache: bool | EmptyType
     exception_handlers: ExceptionHandlersMap | EmptyType
     form: dict[str, str | list[str] | UploadFile] | EmptyType

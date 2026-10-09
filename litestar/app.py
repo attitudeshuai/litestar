@@ -28,6 +28,7 @@ from litestar.config.app import AppConfig, ExperimentalFeatures
 from litestar.config.response_cache import ResponseCacheConfig
 from litestar.connection import Request, WebSocket
 from litestar.datastructures.state import State
+from litestar.di import DependencyCache
 from litestar.events.emitter import BaseEventEmitterBackend, SimpleEventEmitter
 from litestar.exceptions import (
     ImproperlyConfiguredException,
@@ -149,6 +150,7 @@ class Litestar(Router):
         "cors_config",
         "csrf_config",
         "debugger_module",
+        "dependency_cache",
         "event_emitter",
         "experimental_features",
         "multipart_form_part_limit",
@@ -392,6 +394,7 @@ class Litestar(Router):
 
         self._openapi_schema: OpenAPI | None = None
         self._debug: bool = True
+        self.dependency_cache: DependencyCache = DependencyCache()
         self.stores: StoreRegistry = (
             config.stores if isinstance(config.stores, StoreRegistry) else StoreRegistry(config.stores)
         )

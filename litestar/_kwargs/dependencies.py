@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from litestar.di import DependencyCache, DependencyCacheScope
+from litestar.types import Empty
+from litestar.utils.scope.state import ScopeState
+
 __all__ = ("DependencyContainer", "create_dependency_batches", "map_dependencies_recursively", "resolve_dependency")
 
 
@@ -36,6 +40,33 @@ class DependencyContainer:
         return hash(self.key)
 
 
+def get_dependency_cache(provide: Provide, connection: ASGIConnection) -> DependencyCache | None:
+    """Return the cache bound to the provider's configured scope, or ``None``.
+
+    Args:
+        provide: The dependency provider.
+        connection: The current connection, used to reach the app and request scopes.
+
+    Returns:
+        A :class:`DependencyCache` when caching is enabled, otherwise ``None``.
+    """
+    if not provide.use_cache:
+        return None
+
+    if provide.cache_scope == DependencyCacheScope.APP:
+        return connection.app.dependency_cache
+
+    if provide.cache_scope == DependencyCacheScope.REQUEST:
+        connection_state = ScopeState.from_scope(connection.scope)
+        cache = connection_state.dependency_cache
+        if cache is Empty:
+            cache = DependencyCache()
+            connection_state.dependency_cache = cache
+        return cache
+
+    return provide.get_provider_cache()
+
+
 async def resolve_dependency(
     dependency: DependencyContainer,
     connection: ASGIConnection,
@@ -54,18 +85,19 @@ async def resolve_dependency(
         kwargs: Any kwargs to pass to the dependency, the result will be stored here as well.
         cleanup_group: DependencyCleanupGroup to which generators returned by ``dependency`` will be added
     """
-    signature_model = dependency.provide.signature_model
+    provide = dependency.provide
+    signature_model = provide.signature_model
     dependency_kwargs = (
         signature_model.parse_values_from_connection_kwargs(connection=connection, kwargs=kwargs)
         if signature_model._fields
         else {}
     )
-    value = await dependency.provide(**dependency_kwargs)
+    value = await provide.resolve_value(dependency_kwargs, cache=get_dependency_cache(provide, connection))
 
-    if dependency.provide.has_sync_generator_dependency:
+    if provide.has_sync_generator_dependency:
         cleanup_group.add(value)
         value = next(value)
-    elif dependency.provide.has_async_generator_dependency:
+    elif provide.has_async_generator_dependency:
         cleanup_group.add(value)
         value = await anext(value)
 
